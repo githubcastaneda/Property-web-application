@@ -1,0 +1,173 @@
+
+library(shiny)
+library(tidyverse)
+library(DT)
+library(ggthemes)
+library(reshape2)
+library(data.table)
+library(leaflet)
+library(htmltools)
+library(GGally)
+library(miceRanger)
+
+
+housing <- read.csv("Housing_2020.csv", header = TRUE)
+summary(housing)
+dim(housing)
+str(housing)
+
+# Correl matrix
+h <- housing[,-c(1,2,3,4,5,6,11,14,14,17,18,19,20,21,22,23,24,25)]
+ggpairs(h)
+ggcorr(h)
+
+# miceRanger - can be used on all m variables
+# Multiple imputation by chained equations with random forests / skewed data
+m <- housing[,-c(1,2,6,18:23)]
+str(m)
+summary(m)
+
+m <- miceRanger(m)
+data <- completeData(m)
+
+# Returns the data from the miceRanger object (list)
+complete_data <- data.frame(data[[1]])
+summary(complete_data)
+# Remove property value outliers
+c <- complete_data[-c(2521, 2522),]
+l = head(sort(c$PRICE, decreasing = TRUE))
+View(subset(complete_data, PRICE %in% l))
+
+# Readable columns
+colnames(c) <- c("Property.Type", "Address", "City", "Zip.Code", "Price", "Beds", "Baths", "Location",
+                 "Square.Feet", "Lot.Size", "Year", "Listing.Period", "X.SquareFt", "HOA.Monthly",
+                 "Latitude", "Longitude")
+summary(c)
+
+# View histogram resemblance after imputation
+hist(c$Baths) ; hist(housing$BATHS, add = TRUE)
+
+# Explore
+table(housing$SALE.TYPE)
+unique(housing$SOLD.DATE)
+table(housing$STATUS)
+table(complete_data$PROPERTY.TYPE)
+
+table(housing$ZIP.OR.POSTAL.CODE)
+
+x = head(sort(housing$PRICE, decreasing = TRUE))
+View(subset(housing, PRICE %in% x))
+plot(housing$PRICE)
+table(housing$PRICE > 1000000)
+
+length(housing[housing$BEDS == 0,])
+class(housing$BEDS)
+
+table(housing$BATHS, useNA = "ifany")
+
+hist(housing$SQUARE.FEET)
+
+hist(housing$YEAR.BUILT)
+head(sort(housing$YEAR.BUILT, decreasing = FALSE), 20)
+
+table(housing$DAYS.ON.MARKET > 200)
+
+hist(housing$X..SQUARE.FEET)
+table(housing$X..SQUARE.FEET > 1500)
+
+table(housing$HOA.MONTH > 5000)
+hist(housing$HOA.MONTH)
+
+table(housing$STATUS)
+
+table(housing$NEXT.OPEN.HOUSE.END.TIME == "")
+unique(housing$NEXT.OPEN.HOUSE.END.TIME)
+housing$NEXT.OPEN.HOUSE.END.TIME
+
+table(housing$NEXT.OPEN.HOUSE.START.TIME == "")
+
+class(housing$MLS.)
+table(housing$FAVORITE)
+table(housing$INTERESTED)
+
+class(housing$LATITUDE)
+class(housing$LONGITUDE)
+
+sum(is.na(housing$BEDS))
+View(subset(housing, BEDS + 2 < BATHS))
+
+# User Interface
+ui <- navbarPage("Dallas House Price Comparison",
+  tabPanel("Prices by Zip Code",
+           sidebarLayout(
+             sidebarPanel(
+               selectizeInput("zip", "Zip Code", choices = c$Zip.Code, multiple = TRUE)),
+             mainPanel(plotOutput("hist")))),
+  
+  tabPanel("Dwelling Price",
+           DT::dataTableOutput("table")),
+  
+  tabPanel("Property Features",
+           sidebarLayout(
+             sidebarPanel(
+               titlePanel("Features:"),
+               sliderInput("year", "Year Built", min = 1868, max = 2021, value = c(1980, 2010)),
+               sliderInput("square", "Square Feet", min = 0, max = 28000, value = c(1000, 4000)),
+               sliderInput("lot", "Lot Size", min = 0, max = 10000000, value = c(1000, 4000)),
+               sliderInput("bed", "Beds", min = 0, max = 18, value = c(2, 5)),
+               sliderInput("bath", "Baths", min = 0, max = 10, step = 0.5, value = c(1, 4))),
+             mainPanel(plotOutput("boxplot")))),
+  
+  tabPanel("Dallas Listings",
+           titlePanel("Dallas Territory Listings"),
+           leafletOutput("map")))
+
+# Data table for Tab 2
+dt <- data.table(c)
+# Where, Select, Group By
+dtt <- dt[,.(Median_Price = median(Price)), by=list(Property_Type = Property.Type, Zip_Code = Zip.Code)]
+ctd <- data.table(dcast(dtt, Zip_Code ~ Property_Type)) # Cast
+tbl <- ctd[order(-`Single Family Residential`)] # Sort by SFR
+rownames(tbl) <- tbl$Zip_Code # Row labels 
+tbl[, Zip_Code := NULL] # Remove
+tbl <- datatable(tbl, caption = "Median Property Price by Zip Code and Dwelling Type")
+
+
+# Map for Tab 4
+# HTML labels for basic stats
+label <- paste("<p>", c$Year, "</p>",
+               "<p>", c$Price, "</p>",
+               "<p>", c$Property.Type, "</p>",
+               "<p>", c$Beds, "</p>",
+               "<p>", c$Baths, "</p>",
+               "<p>", c$Square.Feet, "</p>")
+
+d <- leaflet(c) %>% addTiles() %>% # Open street map
+  setView(lng = -96.8, lat = 32.8576, zoom = 9) %>%
+  addCircleMarkers(lng = c$Longitude, lat = c$Latitude, color = "green", radius = 5,
+                   clusterOptions = markerClusterOptions(showCoverageOnHover = TRUE),
+                   label = lapply(label, HTML))
+
+# Server
+server <- function(input, output, session) {
+  
+  output$hist <- renderPlot({
+    house <- c %>% filter(c$Zip.Code %in% input$zip) # Identify if x (left) in y (right) and return T/F vector of length x
+    ggplot(house, aes(Price)) + geom_histogram() +
+      ggtitle("Distribution of Prices by Zip Code") + labs(x = "Price Frequencies", y = "Count") +
+      theme_economist()})
+  
+  output$table <- DT::renderDataTable(tbl)
+
+  output$boxplot <- renderPlot({
+    house2 <- c %>% filter(c$Year >= input$year[1] & c$Year <= input$year[2], c$Square.Feet >= input$square[1] &
+                             c$Square.Feet <= input$square[2], c$Lot.Size >= input$lot[1] & c$Lot.Size <= input$lot[2],
+                           c$Beds >= input$bed[1] & c$Beds <= input$bed[2], c$Baths >= input$bath[1] & c$Baths <= input$bath[2])
+      ggplot(house2, aes(x = Beds, y = Price)) + geom_boxplot(notch = TRUE) + theme_economist() +
+      ggtitle("Property Prices Based on Features") + labs(x = "Boxplot", y = "Price Range")})
+  
+  output$map <- renderLeaflet(d)}
+
+# Shiny App
+shinyApp(ui, server)
+
